@@ -43,6 +43,15 @@ To run a single program: `node tools/crun.js prog.c [input.txt] [--trace]`.
 ## Deploy
 The site is fully static (no server needed), so any static host works.
 
+- **Coolify** (or any Docker host): the repo has a `Dockerfile` that rebuilds and verifies the content, then
+  serves the site with nginx on port 80.
+  1. In Coolify: *+ New → Public Repository* (or *Private Repository (with GitHub App)*) and enter the repo URL.
+  2. Branch `main`, **Build Pack: Dockerfile**, **Ports Exposes: `80`**.
+  3. Set your domain under *Domains* (e.g. `https://c.example.com`); Coolify issues the HTTPS certificate.
+  4. Click *Deploy*. Turn on *Auto Deploy* (webhook) to redeploy on every push.
+
+  To try the image locally: `docker build -t c-lab . && docker run -p 8080:80 c-lab`, then open http://localhost:8080.
+
 - **GitHub Pages** (set up): in the repo go to *Settings → Pages → Source* and pick **GitHub Actions**.
   Every push to `main` runs `.github/workflows/deploy.yml`, which rebuilds and verifies the content
   (the deploy stops if any example or solution fails) and publishes `index.html`, `css/` and `js/`.
