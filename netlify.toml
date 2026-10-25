@@ -1,0 +1,3 @@
+# Netlify: static site, no build step needed (js/data/content.js is committed).
+[build]
+  publish = "."

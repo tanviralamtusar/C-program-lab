@@ -39,3 +39,14 @@ node tools/build.js
 This regenerates `js/data/content.js` and runs every example and reference solution through the interpreter.
 Problems are written to `tools/verify-report.json`.
 To run a single program: `node tools/crun.js prog.c [input.txt] [--trace]`.
+
+## Deploy
+The site is fully static (no server needed), so any static host works.
+
+- **GitHub Pages** (set up): in the repo go to *Settings → Pages → Source* and pick **GitHub Actions**.
+  Every push to `main` runs `.github/workflows/deploy.yml`, which rebuilds and verifies the content
+  (the deploy stops if any example or solution fails) and publishes `index.html`, `css/` and `js/`.
+  The site appears at `https://<user>.github.io/<repo>/`.
+- **Netlify / Vercel / Cloudflare Pages**: import the repo with no build command and the repo root as the
+  output directory (`netlify.toml` already says this). `js/data/content.js` is committed, so no build is needed;
+  remember to run `node tools/build.js` and commit after editing content.
