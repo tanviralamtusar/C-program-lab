@@ -41,24 +41,137 @@
   var S = Store.load();
 
   // ---------------------------------------------------------------- accounts
-  // Progress always lives in localStorage; when logged in it is also synced to the server
-  // (server.js) so it follows the student to other devices. On a plain static host the
-  // /api endpoints don't exist and the login button stays hidden.
+  // Progress always lives in localStorage; when logged in it is also synced to Supabase
+  // (table `progress`, see supabase/migrations) so it follows the student to other devices.
   // `base` is the server version this browser last saw; a save based on an older version is
   // refused (409) and merged instead, so two devices never overwrite each other's progress.
-  var Account = { available: false, user: null, timer: null, dirty: false, base: 0, queue: Promise.resolve(), lastPull: 0 };
+  var SUPABASE_URL = 'https://hbxrlyvmfrhhoreztrla.supabase.co';
+  var SUPABASE_KEY = 'sb_publishable_YVnsfXhBlMNLALUOq08o5A_tgxNwy8X';   // publishable key: safe in the browser, RLS guards the data
+  var SESSION_KEY = 'clab.session';
+  var Account = { available: !!SUPABASE_URL, user: null, timer: null, dirty: false, base: 0, queue: Promise.resolve(), lastPull: 0, refreshing: null };
   function serial(fn) { var run = function () { return fn(); }; Account.queue = Account.queue.then(run, run); return Account.queue; }   // one sync request at a time
-  function apiCall(method, route, body) {
-    return fetch('api/' + route, {
-      method: method, credentials: 'same-origin',
-      headers: body ? { 'Content-Type': 'application/json' } : {},
-      body: body ? JSON.stringify(body) : undefined
-    }).then(function (r) {
-      var ct = r.headers.get('content-type') || '';
-      if (ct.indexOf('application/json') < 0) throw new Error('no api');
-      return r.json().then(function (j) { if (!r.ok) { var e = new Error(j.error || 'Request failed'); e.status = r.status; e.body = j; throw e; } return j; });
-    });
+
+  function sbFetch(path, opts) {
+    opts = opts || {};
+    var headers = Object.assign({ apikey: SUPABASE_KEY, 'Content-Type': 'application/json' }, opts.token ? { Authorization: 'Bearer ' + opts.token } : {});
+    return fetch(SUPABASE_URL + path, { method: opts.method || 'GET', headers: headers, body: opts.body ? JSON.stringify(opts.body) : undefined, keepalive: !!opts.keepalive })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) { }
+          if (!r.ok) { var e = new Error(authMessage(j, r.status)); e.status = r.status; e.body = j; throw e; }
+          return j;
+        });
+      }, function () { throw new Error('Could not reach the server. Check your internet connection.'); });
   }
+  function authMessage(j, status) {
+    var code = j && (j.error_code || j.code || j.error), msg = j && (j.msg || j.error_description || j.message);
+    if (code === 'invalid_credentials' || code === 'invalid_grant') return 'Wrong email or password.';
+    if (code === 'email_not_confirmed') return 'Confirm your email first: open the link we sent you (check spam too).';
+    if (code === 'user_already_exists' || code === 'email_exists') return 'That email already has an account. Log in instead.';
+    if (code === 'weak_password') return 'Password must be at least 6 characters.';
+    if (code === 'email_address_invalid' || code === 'validation_failed') return 'Enter a valid email address.';
+    if (code === 'same_password') return 'Choose a password different from the old one.';
+    if (code === 'over_email_send_rate_limit') return 'Too many emails sent. Wait a few minutes and try again.';
+    if (code === 'email_address_not_authorized') return 'This site cannot send email to that address yet. Ask your teacher.';   // Supabase's built-in mailer, before custom SMTP is set up
+    if (status === 429) return 'Too many attempts. Try again in a few minutes.';
+    return msg || 'Request failed';
+  }
+  function readSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || null; } catch (e) { return null; } }
+  function writeSession(s) {
+    try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch (e) { }
+  }
+  function displayName(u) { var m = u.user_metadata || {}; return String(m.name || '').trim() || String(u.email || 'student').split('@')[0]; }
+  function keepSession(r) {   // Supabase Auth token response -> what we store
+    var s = { access_token: r.access_token, refresh_token: r.refresh_token, expires_at: +r.expires_at || Math.floor(Date.now() / 1000) + +r.expires_in,
+      user: { name: displayName(r.user), email: r.user.email } };
+    writeSession(s);
+    return s;
+  }
+  // A valid access token, refreshing it when it is about to expire (one refresh at a time).
+  function accessToken() {
+    var s = readSession();
+    if (!s) return Promise.reject(Object.assign(new Error('Not logged in.'), { status: 401 }));
+    if (s.expires_at - 60 > Date.now() / 1000) return Promise.resolve(s.access_token);
+    if (!Account.refreshing) {
+      Account.refreshing = sbFetch('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: s.refresh_token } })
+        .then(function (r) { return keepSession(r).access_token; }, function (e) {
+          if (e.status >= 400 && e.status < 500) { writeSession(null); e.status = 401; }   // refresh token revoked or expired
+          throw e;
+        })
+        .then(function (t) { Account.refreshing = null; return t; }, function (e) { Account.refreshing = null; throw e; });
+    }
+    return Account.refreshing;
+  }
+  function withToken(fn) { return accessToken().then(fn); }
+  var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  function siteUrl() { return location.origin + location.pathname; }
+  // Links in Supabase emails (confirm sign-up, reset password) come back as #access_token=…&type=…
+  // or #error=…; turn that into a session before the router sees the hash. Returns what the link was for.
+  function takeAuthLink() {
+    var h = location.hash.replace(/^#\/?/, '');
+    if (!/(^|&)(access_token|error_description)=/.test(h)) return null;
+    var q = {};
+    h.split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, ' ')); });
+    history.replaceState(null, '', siteUrl() + '#/');
+    if (q.error_description) return { error: q.error_code === 'otp_expired' ? 'That email link has expired or was already used. Log in, or ask for a new link.' : q.error_description };
+    try {
+      var claims = JSON.parse(decodeURIComponent(escape(atob(q.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))));
+      keepSession({ access_token: q.access_token, refresh_token: q.refresh_token, expires_at: q.expires_at, expires_in: q.expires_in, user: claims });
+    } catch (e) { return { error: 'That link did not work. Try logging in.' }; }
+    return { type: q.type };
+  }
+  // The calls the rest of the app uses; errors carry .status (401 logged out, 409 version conflict).
+  var Cloud = {
+    // Resolves {user} when logged in straight away, or {confirm: true} when a confirmation email was sent.
+    signup: function (email, password, name) {
+      email = String(email || '').trim();
+      if (!EMAIL_RE.test(email)) return Promise.reject(new Error('Enter a valid email address.'));
+      if (password.length < 6) return Promise.reject(new Error('Password must be at least 6 characters.'));
+      return sbFetch('/auth/v1/signup?redirect_to=' + encodeURIComponent(siteUrl()), { method: 'POST', body: { email: email, password: password, data: { name: String(name || '').trim().slice(0, 40) } } })
+        .then(function (r) {
+          if (r && r.access_token) return { user: keepSession(r).user };
+          var u = r && (r.user || r);
+          if (u && u.identities && !u.identities.length) throw new Error('That email already has an account. Log in instead.');
+          return { confirm: true };
+        });
+    },
+    login: function (email, password) {
+      email = String(email || '').trim();
+      if (!email || !password) return Promise.reject(new Error('Enter your email and password.'));
+      return sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: { email: email, password: password } })
+        .then(function (r) { return { user: keepSession(r).user }; });
+    },
+    resendConfirm: function (email) {
+      return sbFetch('/auth/v1/resend?redirect_to=' + encodeURIComponent(siteUrl()), { method: 'POST', body: { type: 'signup', email: String(email || '').trim() } });
+    },
+    sendReset: function (email) {
+      email = String(email || '').trim();
+      if (!EMAIL_RE.test(email)) return Promise.reject(new Error('Enter the email you signed up with.'));
+      return sbFetch('/auth/v1/recover?redirect_to=' + encodeURIComponent(siteUrl()), { method: 'POST', body: { email: email } });
+    },
+    setPassword: function (password) {
+      if (password.length < 6) return Promise.reject(new Error('Password must be at least 6 characters.'));
+      return withToken(function (t) { return sbFetch('/auth/v1/user', { method: 'PUT', token: t, body: { password: password } }); });
+    },
+    logout: function () {
+      var s = readSession(); writeSession(null);
+      if (!s) return Promise.resolve();
+      return sbFetch('/auth/v1/logout', { method: 'POST', token: s.access_token }).catch(function () { });
+    },
+    me: function () { var s = readSession(); return Promise.resolve({ user: s ? s.user : null }); },
+    getProgress: function () {
+      return withToken(function (t) { return sbFetch('/rest/v1/progress?select=data,updated', { token: t }); })
+        .then(function (rows) { var r = rows && rows[0]; return { data: r ? r.data : null, updated: r ? r.updated : 0 }; });
+    },
+    saveProgress: function (data, base, keepalive) {
+      var send = function (t) { return sbFetch('/rest/v1/rpc/save_progress', { method: 'POST', token: t, body: { p_data: data, p_base: base }, keepalive: keepalive }); };
+      if (keepalive) { var s = readSession(); if (s) send(s.access_token).catch(function () { }); return Promise.resolve(); }   // page is closing: no time to refresh
+      return withToken(send).then(function (r) {
+        if (r && r.conflict) { var e = new Error('Progress changed on another device.'); e.status = 409; e.body = r; throw e; }
+        return r;
+      }, function (e) { if (e.status === 401 || (e.body && e.body.code === 'PGRST301')) { e.status = 401; writeSession(null); } throw e; });
+    }
+  };
   function syncSoon() {
     if (!Account.user) return;
     Account.dirty = true;
@@ -70,7 +183,7 @@
       if (!Account.user || !Account.dirty) return;
       Account.dirty = false;
       setAccountStatus('saving');
-      return apiCall('PUT', 'progress', { data: S, base: Account.base }).then(function (r) {
+      return Cloud.saveProgress(S, Account.base).then(function (r) {
         Account.base = r.updated; setAccountStatus('saved');
       }, function (e) {
         if (e.status === 401) { Account.user = null; drawAccount(); return; }
@@ -90,7 +203,7 @@
     if (!Account.user || document.hidden || Date.now() - Account.lastPull < 5000) return;
     Account.lastPull = Date.now();
     serial(function () {
-      return apiCall('GET', 'progress').then(function (r) {
+      return Cloud.getProgress().then(function (r) {
         if (!Account.user || !r.updated || r.updated === Account.base) return;
         // nothing unsaved here: take the account's progress as is (so resets made elsewhere carry over)
         var next = Account.dirty ? mergeProgress(r.data || {}, S) : r.data || {};
@@ -124,7 +237,7 @@
   }
   function loadAccountProgress() {
     return serial(function () {
-      return apiCall('GET', 'progress').then(function (r) {
+      return Cloud.getProgress().then(function (r) {
         var merged = r.data ? mergeProgress(r.data, S) : S;
         Store.replace(JSON.parse(JSON.stringify(merged)));
         Account.base = r.updated || 0;
@@ -145,17 +258,17 @@
     else { b.textContent = 'Log in'; b.classList.remove('signed-in', 'sync-error'); b.title = 'Log in to save your progress to an account'; }
   }
   function initAccount() {
-    apiCall('GET', 'me').then(function (r) {
-      Account.available = true;
+    Cloud.me().then(function (r) {
       Account.user = r.user;
       drawAccount();
       if (r.user) return loadAccountProgress().then(rerenderSafe);
-      if (/^(#\/?(home)?)?$/.test(location.hash)) route();   // show the home page's log-in hint
-    }).catch(function () { Account.available = false; drawAccount(); });
+    }).catch(function (e) {
+      if (e.status === 401) { Account.user = null; drawAccount(); route(); }   // session ended (e.g. password changed elsewhere)
+    });
     // push anything still pending when the tab is closed (if it clashes, it is merged on the next visit)
     window.addEventListener('pagehide', function () {
       if (!Account.user || !Account.dirty) return;
-      try { fetch('api/progress', { method: 'PUT', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: S, base: Account.base }) }); } catch (e) { }
+      try { Cloud.saveProgress(S, Account.base, true); } catch (e) { }
     });
     document.addEventListener('visibilitychange', pullProgress);
     window.addEventListener('focus', pullProgress);
@@ -185,7 +298,7 @@
       $('[data-a="close"]', ov).onclick = close;
       $('[data-a="logout"]', ov).onclick = function () {
         var btn = this; btn.disabled = true;
-        pushProgress().then(function () { return apiCall('POST', 'logout'); }).then(function () {
+        pushProgress().then(Cloud.logout).then(function () {
           Account.user = null; Account.dirty = false;
           try { localStorage.removeItem(Store.key); } catch (e) { }
           Store.replace({});
@@ -197,8 +310,10 @@
     var mode = 'login';
     ov.innerHTML = '<form class="modal" role="dialog" aria-label="Log in" novalidate>' +
       '<h2 class="acc-title">Log in</h2><p class="muted acc-sub">Save your lessons and practice to an account so they follow you to any device.</p>' +
-      '<label class="field"><span>Username</span><input name="username" autocomplete="username" required maxlength="30"></label>' +
-      '<label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>' +
+      '<label class="field acc-name" hidden><span>Your name <small class="muted">(optional)</small></span><input name="name" autocomplete="name" maxlength="40"></label>' +
+      '<label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" required maxlength="254"></label>' +
+      '<label class="field acc-pw"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>' +
+      '<p class="acc-forgot"><a href="#" data-a="forgot">Forgot password?</a></p>' +
       '<div class="form-err" hidden></div>' +
       '<div class="modal-actions"><button type="submit" class="btn primary acc-submit">Log in</button></div>' +
       '<p class="acc-switch muted"><span class="acc-q">New here?</span> <a href="#" data-a="switch">Create an account</a></p></form>';
@@ -206,22 +321,43 @@
     var form = $('form', ov), err = $('.form-err', ov);
     function setMode(m) {
       mode = m;
-      var signup = m === 'signup';
-      $('.acc-title', ov).textContent = signup ? 'Create an account' : 'Log in';
-      $('.acc-submit', ov).textContent = signup ? 'Create account' : 'Log in';
-      $('.acc-q', ov).textContent = signup ? 'Already have an account?' : 'New here?';
-      $('[data-a="switch"]', ov).textContent = signup ? 'Log in' : 'Create an account';
+      var signup = m === 'signup', reset = m === 'reset';
+      $('.acc-title', ov).textContent = signup ? 'Create an account' : reset ? 'Reset your password' : 'Log in';
+      $('.acc-sub', ov).textContent = reset ? 'Enter the email you signed up with and we will send you a link to choose a new password.' :
+        'Save your lessons and practice to an account so they follow you to any device.';
+      $('.acc-submit', ov).textContent = signup ? 'Create account' : reset ? 'Send reset link' : 'Log in';
+      $('.acc-q', ov).textContent = signup || reset ? 'Already have an account?' : 'New here?';
+      $('[data-a="switch"]', ov).textContent = signup || reset ? 'Log in' : 'Create an account';
+      $('.acc-name', ov).hidden = !signup;
+      $('.acc-pw', ov).hidden = reset;
+      $('.acc-forgot', ov).hidden = m !== 'login';
       form.password.setAttribute('autocomplete', signup ? 'new-password' : 'current-password');
       form.password.placeholder = signup ? 'At least 6 characters' : '';
-      form.username.placeholder = signup ? 'letters, digits, _ . -' : '';
       err.hidden = true;
     }
-    $('[data-a="switch"]', ov).onclick = function (e) { e.preventDefault(); setMode(mode === 'login' ? 'signup' : 'login'); form.username.focus(); };
+    // after sign-up or a reset request: say where the email went (and allow sending it again)
+    function sent(title, text, resend) {
+      $('.modal', ov).innerHTML = '<h2>' + title + '</h2><p class="muted">' + text + '</p>' +
+        '<p class="muted small">No email after a few minutes? Check your spam folder' + (resend ? ', or <a href="#" data-a="resend">send it again</a>' : '') + '.</p>' +
+        '<div class="form-err" hidden></div><div class="modal-actions"><button type="button" class="btn primary" data-a="close">OK</button></div>';
+      $('[data-a="close"]', ov).onclick = close;
+      var r = $('[data-a="resend"]', ov), e2 = $('.form-err', ov);
+      if (r) r.onclick = function (e) {
+        e.preventDefault();
+        resend().then(function () { r.replaceWith('sent again'); }, function (x) { e2.textContent = x.message; e2.hidden = false; });
+      };
+    }
+    $('[data-a="switch"]', ov).onclick = function (e) { e.preventDefault(); setMode(mode === 'login' ? 'signup' : 'login'); form.email.focus(); };
+    $('[data-a="forgot"]', ov).onclick = function (e) { e.preventDefault(); setMode('reset'); form.email.focus(); };
     form.onsubmit = function (e) {
       e.preventDefault();
       var btn = $('.acc-submit', ov); btn.disabled = true; err.hidden = true;
-      var hadLocal = hasProgress(S);
-      apiCall('POST', mode, { username: form.username.value, password: form.password.value }).then(function (r) {
+      var hadLocal = hasProgress(S), email = form.email.value.trim();
+      var req = mode === 'reset' ? Cloud.sendReset(email) : mode === 'signup' ? Cloud.signup(email, form.password.value, form.name.value) : Cloud.login(email, form.password.value);
+      req.then(function (r) {
+        if (mode === 'reset') return sent('Check your email', 'If <b>' + esc(email) + '</b> has an account, we sent it a link to choose a new password.');
+        if (r.confirm) return sent('Confirm your email', 'We sent a link to <b>' + esc(email) + '</b>. Open it to finish creating your account; you will be logged in here.',
+          function () { return Cloud.resendConfirm(email); });
         Account.user = r.user;
         drawAccount();
         return loadAccountProgress().then(function () {
@@ -230,11 +366,31 @@
         });
       }).catch(function (x) {
         btn.disabled = false;
-        err.textContent = x.message === 'no api' ? 'Accounts are not available on this server.' : x.message;
+        err.textContent = x.message;
         err.hidden = false;
       });
     };
-    form.username.focus();
+    form.email.focus();
+  }
+  // Opened from a password-reset email link (already logged in by the link).
+  function openPasswordDialog() {
+    var ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = '<form class="modal" role="dialog" aria-label="Choose a new password" novalidate><h2>Choose a new password</h2>' +
+      '<label class="field"><span>New password</span><input name="password" type="password" autocomplete="new-password" placeholder="At least 6 characters" required></label>' +
+      '<div class="form-err" hidden></div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-a="close">Not now</button><button type="submit" class="btn primary">Save password</button></div></form>';
+    document.body.appendChild(ov);
+    var form = $('form', ov), err = $('.form-err', ov);
+    $('[data-a="close"]', ov).onclick = function () { ov.remove(); };
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      var btn = $('button[type="submit"]', ov); btn.disabled = true; err.hidden = true;
+      Cloud.setPassword(form.password.value).then(function () { ov.remove(); toast('Password changed.'); }, function (x) {
+        btn.disabled = false; err.textContent = x.message; err.hidden = false;
+      });
+    };
+    form.password.focus();
   }
   function toast(msg) {
     var t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
@@ -1054,8 +1210,12 @@
     main = $('#main');
     $('.theme-toggle').onclick = toggleTheme;
     $('.account-btn').onclick = openAccountDialog;
+    var link = takeAuthLink();   // back from a confirm / reset-password email
     window.addEventListener('hashchange', route);
     route();
     initAccount();
+    if (link && link.error) toast(link.error);
+    else if (link && link.type === 'recovery') openPasswordDialog();
+    else if (link) toast('Email confirmed. You are logged in.');
   });
 })();

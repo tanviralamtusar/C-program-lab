@@ -132,6 +132,7 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 .modal-actions .btn { min-width: 7em; justify-content: center; }
 form.modal .modal-actions .btn { flex: 1; padding: .6em; font-size: .95rem; }
 .acc-switch { text-align: center; margin: 1rem 0 0 !important; }
+.acc-forgot { text-align: right; margin: -.4rem 0 .8rem !important; font-size: .85rem; }
 .acc-stats { display: flex; gap: 1.5rem; margin-bottom: 1.2rem; font-size: .9rem; color: var(--ink-2); }
 .acc-stats b { font-size: 1.4rem; color: var(--ink); display: block; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 130; background: var(--ink); color: var(--bg); padding: .65em 1.1em; border-radius: 10px; font-size: .9rem; box-shadow: var(--shadow); transition: opacity .4s; max-width: calc(100vw - 32px); }
