@@ -224,7 +224,7 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 .term { display: flex; flex-direction: column; flex: 1; min-height: 0; margin-top: .3rem; border-radius: 8px; overflow: hidden; background: var(--term-bg); border: 1px solid var(--term-line); outline: none; }
 .term-bar { flex: none; display: flex; align-items: center; gap: .5rem; padding: .3rem .6rem; background: var(--term-bar); border-bottom: 1px solid var(--term-line); }
 .term-title { font: 600 .72rem var(--font); letter-spacing: .06em; text-transform: uppercase; color: #c9d1dc; }
-.term-hint { flex: 1; font: .7rem var(--font); color: var(--term-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term-hint { flex: 1; min-width: 0; font: .7rem var(--font); color: var(--term-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .io-out.term-body { flex: 1; margin: 0; padding: .55rem .7rem; overflow: auto; color: var(--term-ink); font: .86rem/1.45 var(--mono); cursor: text; }
 .term-body > div, .term-out { white-space: pre-wrap; word-break: break-word; }
 .term-out { margin: 0; font: inherit; color: var(--term-ink); }
@@ -241,6 +241,9 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 .term-stop:hover { border-color: var(--term-dim); color: #fff; }
 .term-stop.con-stop:hover { border-color: var(--term-err); color: var(--term-err); }
 .term-stop[hidden] { display: none; }
+
+/* stop iOS zooming in when the console input gets focus */
+@media (pointer: coarse) { .term-body .con-in, .term-body .con-in:focus { font-size: 16px; } }
 
 /* ============================================================ practice */
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; }
@@ -311,7 +314,7 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 .pg-main { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); background: var(--surface); }
 .pg-side { padding: .8rem; overflow-y: auto; display: flex; flex-direction: column; gap: .35rem; }
 .pg-side .io-in { flex: none; height: 110px; }
-.pg-side .term.con { flex: 1; margin-top: 0; min-height: 240px; }
+.pg-side .term.con { flex: 1; margin-top: 0; min-height: 240px; scroll-margin-top: 64px; }
 .pg-examples { font-size: .82rem; max-width: 260px; }
 .files-panel { margin-top: .8rem; border: 1px solid var(--line); border-radius: 10px; padding: .5rem .8rem; background: var(--surface); }
 .files-panel summary { cursor: pointer; font-weight: 600; }
@@ -479,9 +482,12 @@ textarea { font-family: var(--mono); font-size: .85rem; }
   .side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   .step-list { display: none; }
   .lesson { padding: 1rem 16px 3rem; }
-  .prob-layout, .pg-layout { grid-template-columns: 1fr; height: auto; }
+  .prob-layout, .pg-layout { grid-template-columns: minmax(0, 1fr); height: auto; }
   .prob-left { border-right: 0; border-bottom: 1px solid var(--line); }
   .prob-right .ed-host, .pg-main .ed-host { height: 55vh; flex: none; }
+  .pg-main .ed-host { height: 46vh; }
+  .pg-main { border-right: 0; }
+  .pg-side .term.con { flex: none; height: calc(100svh - 80px); min-height: 320px; }
   .bottom-panel { height: auto; }
   .viz-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; }
   .viz-code { max-height: 30vh; }
@@ -489,8 +495,19 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 }
 @media (max-width: 640px) {
   .topbar { gap: .6rem; padding: .5rem 16px; }
-  .brand-text small { display: none; }
-  .nav a { padding: .35em .5em; font-size: .9rem; }
+  .brand-text { display: none; }
+  .nav { overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav::after { content: ''; flex: 0 0 6px; }
+  .nav a { padding: .35em .55em; font-size: .9rem; white-space: nowrap; }
+  .ed-bar { gap: .4rem; padding: .4rem .5rem; }
+  .pg-examples { flex: 1; min-width: 0; max-width: none; }
+  .ed-actions { margin-left: 0; width: 100%; }
+  .ed-actions .btn { flex: 1; justify-content: center; }
+  .term-hint { display: none; }
+  .term-title { margin-right: auto; }
+  .term-stop { padding: .3em .75em; font-size: .8rem; }
+  .io-out.term-body { font-size: .9rem; }
   .page { padding: 1rem 16px 3rem; }
   .how { grid-template-columns: 1fr; }
   .roadmap { grid-template-columns: 1fr; }

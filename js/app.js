@@ -151,9 +151,10 @@
 
   // Interactive console: the program stops with needInput whenever it reads past the typed input;
   // the typed line is appended and the program re-runs from the start (runs are deterministic).
+  var TOUCH = window.matchMedia && matchMedia('(pointer: coarse)').matches;
   function makeConsole(host, cfg) {
     var body = $('.term-body', host), stdin = '', typed = [], closed = false, job = null, last = null, state = 'idle', files0 = {};
-    function setState(s) { state = s; host.setAttribute('data-state', s); $('.con-stop', host).hidden = !(s === 'running' || s === 'waiting'); }
+    function setState(s) { state = s; host.setAttribute('data-state', s); $('.con-stop', host).hidden = !(s === 'running' || s === 'waiting'); $('.con-eof', host).hidden = s !== 'waiting'; }
     function transcript(out) {
       // interleave program output with what was typed, at the output position where each line was asked for
       var html = '', pos = 0;
@@ -164,13 +165,13 @@
       var html = termCompileMsgs(res, null), out = res.stdout || '';
       if (!res.compileError) {
         html += '<pre class="term-out">' + transcript(state === 'done' ? out.replace(/\n$/, '') : out);
-        if (state === 'waiting') html += '<input class="con-in" spellcheck="false" autocomplete="off" aria-label="Program input">';
+        if (state === 'waiting') html += '<input class="con-in" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="send" aria-label="Program input">';
         html += '</pre>';
         if (slow) html += '<div class="term-dim">Running…</div>';
         if (state === 'done') {
           html += '<div class="term-gap"></div>' + termEnd(res, null);
           if (res.stdinLen != null && res.stdinUsed < res.stdinLen && /\S/.test(stdin.slice(res.stdinUsed))) html += '<div class="term-dim">Note: part of the input was never read by the program.</div>';
-          html += '<div class="term-ok">Press ENTER to exit console.</div>';
+          html += '<div class="term-ok">' + (TOUCH ? 'Tap Clear to exit console.' : 'Press ENTER to exit console.') + '</div>';
         }
       }
       body.innerHTML = html;
@@ -179,13 +180,14 @@
       if (inp) {
         inp.onkeydown = function (e) {
           if (e.key === 'Enter') { e.preventDefault(); send(inp.value); }
-          else if ((e.key === 'd' || e.key === 'z') && e.ctrlKey) { e.preventDefault(); if (inp.value) send(inp.value, true); else { closed = true; exec(); } }
+          else if ((e.key === 'd' || e.key === 'z') && e.ctrlKey) { e.preventDefault(); eof(); }
           else if (e.key === 'c' && e.ctrlKey && !inp.value) { e.preventDefault(); stop(); }
         };
         inp.focus({ preventScroll: true });
       }
       body.scrollTop = body.scrollHeight;
     }
+    function eof() { var inp = $('.con-in', body); if (inp && inp.value) send(inp.value, true); else { closed = true; exec(); } }
     function send(line, thenClose) {
       typed.push({ at: (last.stdout || '').length, text: line });
       stdin += line + '\n';
@@ -212,6 +214,7 @@
     }
     function start() {
       stdin = ''; typed = []; closed = false; last = null; files0 = JSON.parse(JSON.stringify(cfg.getFiles ? cfg.getFiles() : {}));
+      if (host.getBoundingClientRect().top > window.innerHeight * .6) host.scrollIntoView({ behavior: 'smooth', block: 'start' });
       exec();
     }
     function stop() {
@@ -227,6 +230,7 @@
     host.addEventListener('keydown', function (e) { if (state === 'done' && e.key === 'Enter' && e.target === host) { e.preventDefault(); clear(); } });
     body.addEventListener('mouseup', function () { if (state === 'done' && !String(window.getSelection())) host.focus({ preventScroll: true }); });
     $('.con-stop', host).onclick = stop;
+    $('.con-eof', host).onclick = eof;
     $('.con-clear', host).onclick = function () { if (state === 'running' || state === 'waiting') stop(); clear(); };
     clear();
     return { start: start, stop: stop, focus: function () { host.focus(); } };
@@ -259,7 +263,16 @@
 
   // ---------------------------------------------------------------- layout helpers
   var main;
-  function setActiveNav(name) { $$('.nav a').forEach(function (a) { a.classList.toggle('active', a.getAttribute('data-nav') === name); }); }
+  function setActiveNav(name) {
+    $$('.nav a').forEach(function (a) { a.classList.toggle('active', a.getAttribute('data-nav') === name); });
+    centerActiveNav();
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(centerActiveNav);
+  }
+  // on phones the nav scrolls sideways; keep the active tab visible
+  function centerActiveNav() {
+    var nav = $('.nav'), a = nav && $('a.active', nav);
+    if (a && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = Math.max(0, a.offsetLeft - nav.offsetLeft - (nav.clientWidth - a.offsetWidth) / 2);
+  }
   function diffBadge(d) { return '<span class="badge diff-' + esc(d) + '">' + esc(d) + '</span>'; }
   function progressBar(p) { return '<div class="pbar"><div style="width:' + p + '%"></div></div>'; }
   function codeBlock(code) { return '<pre class="code-block hl"><code>' + Highlight.c(code.replace(/\n$/, '')) + '</code></pre>'; }
@@ -557,7 +570,7 @@
       exOpts += '</optgroup>';
     });
     main.innerHTML = '<div class="pg-layout"><section class="pg-main"><div class="ed-bar"><span class="ed-file">main.c</span><select class="pg-examples">' + exOpts + '</select><div class="ed-actions"><button class="btn sm" data-a="new">New</button><button class="btn sm" data-a="viz">👁 Visualize</button><button class="btn sm primary" data-a="run" title="Ctrl+Enter">▶ Run</button></div></div><div class="ed-host"></div></section>' +
-      '<section class="pg-side"><div class="term con" tabindex="-1"><div class="term-bar"><span class="term-title">console</span><span class="term-hint">type input here · Ctrl+D = end of input</span><button class="term-stop con-stop" hidden>■ Stop</button><button class="term-stop con-clear">Clear</button></div><div class="io-out term-body"></div></div>' +
+      '<section class="pg-side"><div class="term con" tabindex="-1"><div class="term-bar"><span class="term-title">console</span><span class="term-hint">type input here · Ctrl+D = end of input</span><button class="term-stop con-eof" hidden title="End of input (Ctrl+D)">EOF</button><button class="term-stop con-stop" hidden>■ Stop</button><button class="term-stop con-clear">Clear</button></div><div class="io-out term-body"></div></div>' +
       '<details class="files-panel"' + '><summary>Virtual files <span class="muted small">(for fopen)</span></summary><div class="files-list"></div><div class="file-new"><input class="file-name" placeholder="new-file.txt"><button class="btn sm" data-a="addfile">Add file</button></div></details></section></div>';
     var lastInput = pg.input || '';
     function savePg() { S.playground = { code: ed.get(), input: lastInput }; saveSoon(); }
@@ -566,7 +579,7 @@
       onRun: function () { run(); }
     });
     var con = makeConsole($('.con'), {
-      editor: ed, hint: 'Press ▶ Run (Ctrl+Enter), then type the program\'s input right here.',
+      editor: ed, hint: (TOUCH ? 'Tap ▶ Run' : 'Press ▶ Run (Ctrl+Enter)') + ', then type the program\'s input right here.',
       getCode: function () { return ed.get(); },
       getFiles: function () { return S.files; },
       onDone: function (r, stdin) {
