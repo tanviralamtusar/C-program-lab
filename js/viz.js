@@ -34,14 +34,19 @@
       '      <select class="viz-speed" title="Playback speed"><option value="1200">Slow</option><option value="600" selected>Normal</option><option value="250">Fast</option><option value="60">Very fast</option></select>' +
       '    </div>' +
       '    <div class="viz-slider-row"><input type="range" class="viz-slider" min="0" max="0" value="0" aria-label="Step"><span class="viz-stepno"></span></div>' +
+      '    <div class="viz-split split-y" data-var="--viz-explain" data-measure=".viz-explain" data-sign="-1" title="Drag to resize (double-click to reset)"></div>' +
       '    <div class="viz-explain"></div>' +
+      '    <div class="viz-split split-y" data-var="--viz-io" data-measure=".viz-out" data-sign="-1" title="Drag to resize (double-click to reset)"></div>' +
       '    <div class="viz-io">' +
       '      <div class="viz-io-box"><div class="viz-io-label">Output (stdout)</div><pre class="viz-out"></pre></div>' +
+      '      <div class="viz-split split-x viz-split-io" data-var="--viz-out" data-measure=".viz-io-box" data-sign="1" title="Drag to resize (double-click to reset)"></div>' +
       '      <div class="viz-io-box viz-in-box"><div class="viz-io-label">Input (stdin) <span class="muted">— grey part is already read</span></div><pre class="viz-in"></pre></div>' +
       '    </div>' +
       '  </section>' +
+      '  <div class="viz-split split-x viz-split-main" data-var="--viz-left" data-measure=".viz-left" data-sign="1" title="Drag to resize (double-click to reset)"></div>' +
       '  <section class="viz-right">' +
       '    <div class="viz-mem-wrap"><div class="viz-mem"></div><svg class="viz-arrows" aria-hidden="true"></svg></div>' +
+      '    <div class="viz-split split-x viz-split-mf" data-var="--viz-mem" data-var-y="--viz-mem-y" data-measure=".viz-mem-wrap" data-sign="1" title="Drag to resize (double-click to reset)"></div>' +
       '    <div class="viz-flow-wrap" hidden></div>' +
       '  </section>' +
       ' </div>' +
@@ -113,6 +118,7 @@
       };
     });
     el.querySelector('.viz-mem-wrap').addEventListener('scroll', drawArrows);
+    wireSplits(el);
     window.addEventListener('keydown', onKey);
     window.addEventListener('resize', onResize);
   }
@@ -129,6 +135,61 @@
   }
   var rT;
   function onResize() { clearTimeout(rT); rT = setTimeout(drawArrows, 60); }
+
+  // ---------------------------------------------------------------- resizable panels
+  // Each .viz-split handle drags the size of its `data-measure` element, stored as a CSS
+  // variable on .viz (so the mobile layout can ignore it) and remembered per browser.
+  var SPLIT_KEY = 'clab.vizSplits';
+  function loadSplits() { try { return JSON.parse(localStorage.getItem(SPLIT_KEY)) || {}; } catch (e) { return {}; } }
+  function saveSplits(o) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(o)); } catch (e) { } }
+  function wireSplits(el) {
+    var sizes = loadSplits();
+    Object.keys(sizes).forEach(function (k) { el.style.setProperty(k, sizes[k] + 'px'); });
+    el.querySelectorAll('.viz-split').forEach(function (hd) {
+      var sign = +hd.getAttribute('data-sign');
+      // the memory/flow split stacks on narrow screens, so it keeps a separate height
+      var varName = function () { return hd.offsetWidth < hd.offsetHeight ? hd.getAttribute('data-var') : hd.getAttribute('data-var-y') || hd.getAttribute('data-var'); };
+      hd.addEventListener('pointerdown', function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        var horiz = hd.offsetWidth < hd.offsetHeight; // a tall thin bar drags left/right
+        var name = varName();
+        var target = el.querySelector(hd.getAttribute('data-measure'));
+        var parent = hd.parentElement.getBoundingClientRect();
+        var r = target.getBoundingClientRect();
+        var start = horiz ? e.clientX : e.clientY, size0 = horiz ? r.width : r.height;
+        var max = (horiz ? parent.width : parent.height) - 120;
+        hd.setPointerCapture(e.pointerId);
+        hd.classList.add('dragging');
+        document.body.classList.add(horiz ? 'resizing-x' : 'resizing-y');
+        var move = function (ev) {
+          var d = (horiz ? ev.clientX : ev.clientY) - start;
+          var v = Math.round(Math.max(60, Math.min(max, size0 + sign * d)));
+          el.style.setProperty(name, v + 'px');
+          sizes[name] = v;
+          onResize();
+        };
+        var up = function () {
+          hd.removeEventListener('pointermove', move);
+          hd.removeEventListener('pointerup', up);
+          hd.removeEventListener('pointercancel', up);
+          hd.classList.remove('dragging');
+          document.body.classList.remove('resizing-x', 'resizing-y');
+          saveSplits(sizes);
+        };
+        hd.addEventListener('pointermove', move);
+        hd.addEventListener('pointerup', up);
+        hd.addEventListener('pointercancel', up);
+      });
+      hd.addEventListener('dblclick', function () {
+        var name = varName();
+        el.style.removeProperty(name);
+        delete sizes[name];
+        saveSplits(sizes);
+        onResize();
+      });
+    });
+  }
   function play() {
     if (!state.trace.length) return;
     if (state.idx >= state.trace.length - 1) go(0);
