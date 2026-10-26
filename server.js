@@ -1,4 +1,4 @@
-/* C Practice Lab server: serves the static site and a tiny account API so students can keep
+/* PractLab server: serves the static site and a tiny account API so students can keep
    their lesson and practice progress across devices. No dependencies; data is JSON files in DATA_DIR.
 
    POST /api/signup   {username, password}  -> {user}     (also logs in)
@@ -172,4 +172,4 @@ http.createServer(function (req, res) {
     console.error(e);
     if (!res.headersSent) send(res, 500, { error: 'Server error.' });
   }
-}).listen(PORT, function () { console.log('C Practice Lab on http://localhost:' + PORT + '  (data: ' + DATA + ')'); });
+}).listen(PORT, function () { console.log('PractLab on http://localhost:' + PORT + '  (data: ' + DATA + ')'); });

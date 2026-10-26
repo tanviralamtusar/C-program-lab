@@ -1,4 +1,4 @@
-/* C Practice Lab — single-page app: home, lessons, practice problems, playground. */
+/* PractLab — single-page app: home, lessons, practice problems, playground. */
 (function () {
   'use strict';
   var COURSE = window.COURSE || { lessons: [] };
@@ -1048,7 +1048,7 @@
       case 'test': pageTest(h[1]); break;
       default: notFound();
     }
-    document.title = (h[0] === 'learn' && LES[h[1]] ? LES[h[1]].title + ' · ' : h[0] === 'problem' && PROB[h[1]] ? PROB[h[1]].title + ' · ' : '') + 'C Practice Lab';
+    document.title = (h[0] === 'learn' && LES[h[1]] ? LES[h[1]].title + ' · ' : h[0] === 'problem' && PROB[h[1]] ? PROB[h[1]].title + ' · ' : '') + 'PractLab';
   }
   document.addEventListener('DOMContentLoaded', function () {
     main = $('#main');

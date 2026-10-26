@@ -1,4 +1,4 @@
-# C Practice Lab (CSE103)
+# PractLab (CSE103)
 
 A step-by-step C learning and practice site built from the CSE103 course materials.
 
@@ -62,7 +62,7 @@ Use the Docker image (Coolify) to get accounts. The site itself is static, so an
   4. Set your domain under *Domains* (e.g. `https://c.example.com`); Coolify issues the HTTPS certificate.
   5. Click *Deploy*. Turn on *Auto Deploy* (webhook) to redeploy on every push.
 
-  To try the image locally: `docker build -t c-lab . && docker run -p 8080:80 -v clab-data:/data c-lab`, then open http://localhost:8080.
+  To try the image locally: `docker build -t practlab . && docker run -p 8080:80 -v practlab-data:/data practlab`, then open http://localhost:8080.
 
 - **GitHub Pages** (set up): in the repo go to *Settings → Pages → Source* and pick **GitHub Actions**.
   Every push to `main` runs `.github/workflows/deploy.yml`, which rebuilds and verifies the content
