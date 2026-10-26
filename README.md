@@ -33,7 +33,9 @@ NULL or dangling pointers, use-after-free, missing semicolons, and so on.
 Progress, saved code and files are stored in the browser (localStorage). Students can also **create an account**
 (email + password) so their lesson steps, quizzes, solved problems, saved code and tests sync to the cloud and
 follow them to any device. When someone logs in, the progress already in that browser is merged into the account;
-logging out clears it from the browser. There is a *Forgot password?* link that emails a reset link.
+logging out clears it from the browser. There is a *Forgot password?* link that emails a reset link, and
+*Edit profile* in the account box sets a name, student ID, section and a new password (stored in the account's
+Supabase `user_metadata`; display only).
 
 Accounts use **Supabase** (project `hbxrlyvmfrhhoreztrla`; the URL and publishable key are at the top of the
 accounts section in `js/app.js`). The browser talks to Supabase directly, so this works on any host.

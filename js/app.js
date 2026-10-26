@@ -80,10 +80,16 @@
   function writeSession(s) {
     try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch (e) { }
   }
+  var PROFILE_FIELDS = ['name', 'student_id', 'section'];   // kept in the account's user_metadata (display only, never used for access)
+  function sessionUser(u) {
+    var m = u.user_metadata || {}, profile = {};
+    PROFILE_FIELDS.forEach(function (k) { profile[k] = String(m[k] || '').trim(); });
+    return { name: displayName(u), email: u.email, profile: profile };
+  }
   function displayName(u) { var m = u.user_metadata || {}; return String(m.name || '').trim() || String(u.email || 'student').split('@')[0]; }
   function keepSession(r) {   // Supabase Auth token response -> what we store
     var s = { access_token: r.access_token, refresh_token: r.refresh_token, expires_at: +r.expires_at || Math.floor(Date.now() / 1000) + +r.expires_in,
-      user: { name: displayName(r.user), email: r.user.email } };
+      user: sessionUser(r.user) };
     writeSession(s);
     return s;
   }
@@ -148,6 +154,17 @@
       email = String(email || '').trim();
       if (!EMAIL_RE.test(email)) return Promise.reject(new Error('Enter the email you signed up with.'));
       return sbFetch('/auth/v1/recover?redirect_to=' + encodeURIComponent(siteUrl()), { method: 'POST', body: { email: email } });
+    },
+    // Save profile fields (and a new password when one is given); resolves with the updated user.
+    updateProfile: function (profile, password) {
+      if (password && password.length < 6) return Promise.reject(new Error('Password must be at least 6 characters.'));
+      var body = { data: profile };
+      if (password) body.password = password;
+      return withToken(function (t) { return sbFetch('/auth/v1/user', { method: 'PUT', token: t, body: body }); }).then(function (u) {
+        var sess = readSession();
+        if (sess) { sess.user = sessionUser(u); writeSession(sess); }
+        return { user: sessionUser(u) };
+      });
     },
     setPassword: function (password) {
       if (password.length < 6) return Promise.reject(new Error('Password must be at least 6 characters.'));
@@ -282,29 +299,14 @@
   function openAccountDialog() {
     var ov = document.createElement('div');
     ov.className = 'modal-overlay';
-    var close = function () { ov.remove(); document.removeEventListener('keydown', onEsc); };
+    var close = ov.close = function () { ov.remove(); document.removeEventListener('keydown', onEsc); };
     var onEsc = function (e) { if (e.key === 'Escape') close(); };
     document.addEventListener('keydown', onEsc);
     ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
     if (Account.user) {
-      var solved = PROBLEMS.filter(function (p) { return S.solved[p.id]; }).length, steps = 0;
-      LESSONS.forEach(function (L) { steps += lessonStats(L).steps; });
-      ov.innerHTML = '<div class="modal" role="dialog" aria-label="Account"><h2>' + esc(Account.user.name) + '</h2>' +
-        '<p class="muted">Your progress is saved to this account and follows you to any device you log in on.</p>' +
-        '<div class="acc-stats"><div><b>' + steps + '</b> lesson steps done</div><div><b>' + solved + '</b> problems solved</div></div>' +
-        '<div class="modal-actions"><button class="btn" data-a="close">Close</button><button class="btn primary" data-a="logout">Log out</button></div>' +
-        '<p class="muted small">Logging out clears your progress from this browser; it stays safe in your account.</p></div>';
+      ov.innerHTML = '<div class="modal" role="dialog" aria-label="Account"></div>';
       document.body.appendChild(ov);
-      $('[data-a="close"]', ov).onclick = close;
-      $('[data-a="logout"]', ov).onclick = function () {
-        var btn = this; btn.disabled = true;
-        pushProgress().then(Cloud.logout).then(function () {
-          Account.user = null; Account.dirty = false;
-          try { localStorage.removeItem(Store.key); } catch (e) { }
-          Store.replace({});
-          drawAccount(); close(); route();
-        }, function () { btn.disabled = false; });
-      };
+      showAccount();
       return;
     }
     var mode = 'login';
@@ -391,6 +393,63 @@
       });
     };
     form.password.focus();
+  }
+  // Logged-in views of the account box: summary, and the profile form.
+  function showAccount() {
+    var ov = $('.modal-overlay'), box = $('.modal', ov), u = Account.user, pr = u.profile || {};
+    var solved = PROBLEMS.filter(function (p) { return S.solved[p.id]; }).length, steps = 0;
+    LESSONS.forEach(function (L) { steps += lessonStats(L).steps; });
+    var idLine = [pr.student_id && 'ID ' + esc(pr.student_id), pr.section && 'Section ' + esc(pr.section)].filter(Boolean).join(' · ');
+    box.innerHTML = '<h2>' + esc(u.name) + '</h2>' +
+      '<p class="muted acc-who">' + esc(u.email || '') + (idLine ? '<br>' + idLine : '') + '</p>' +
+      '<p class="muted">Your progress is saved to this account and follows you to any device you log in on.</p>' +
+      '<div class="acc-stats"><div><b>' + steps + '</b> lesson steps done</div><div><b>' + solved + '</b> problems solved</div></div>' +
+      '<div class="modal-actions"><button class="btn" data-a="close">Close</button><button class="btn" data-a="profile">Edit profile</button><button class="btn primary" data-a="logout">Log out</button></div>' +
+      '<p class="muted small">Logging out clears your progress from this browser; it stays safe in your account.</p>';
+    var close = ov.close;
+    $('[data-a="close"]', box).onclick = close;
+    $('[data-a="profile"]', box).onclick = showProfileForm;
+    $('[data-a="logout"]', box).onclick = function () {
+      var btn = this; btn.disabled = true;
+      pushProgress().then(Cloud.logout).then(function () {
+        Account.user = null; Account.dirty = false;
+        try { localStorage.removeItem(Store.key); } catch (e) { }
+        Store.replace({});
+        drawAccount(); close(); route();
+      }, function () { btn.disabled = false; });
+    };
+  }
+  function showProfileForm() {
+    var ov = $('.modal-overlay'), pr = Account.user.profile || {};
+    var field = function (name, label, attrs) {
+      return '<label class="field"><span>' + label + '</span><input name="' + name + '" value="' + esc(pr[name] || '') + '" ' + attrs + '></label>';
+    };
+    var form = document.createElement('form');
+    form.className = 'modal'; form.noValidate = true;
+    form.setAttribute('role', 'dialog'); form.setAttribute('aria-label', 'Edit profile');
+    form.innerHTML = '<h2>Edit profile</h2><p class="muted">' + esc(Account.user.email || '') + '</p>' +
+      field('name', 'Name', 'autocomplete="name" maxlength="40" placeholder="Shown on the top bar"') +
+      '<div class="acc-row">' + field('student_id', 'Student ID <small class="muted">(optional)</small>', 'maxlength="20" inputmode="numeric"') +
+      field('section', 'Section <small class="muted">(optional)</small>', 'maxlength="10"') + '</div>' +
+      '<label class="field"><span>New password <small class="muted">(leave blank to keep)</small></span><input name="password" type="password" autocomplete="new-password" placeholder="At least 6 characters"></label>' +
+      '<div class="form-err" hidden></div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-a="back">Cancel</button><button type="submit" class="btn primary">Save</button></div>';
+    $('.modal', ov).replaceWith(form);
+    var err = $('.form-err', form);
+    var back = function () { var d = document.createElement('div'); d.className = 'modal'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-label', 'Account'); form.replaceWith(d); showAccount(); };
+    $('[data-a="back"]', form).onclick = back;
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      var btn = $('button[type="submit"]', form); btn.disabled = true; err.hidden = true;
+      var profile = {};
+      PROFILE_FIELDS.forEach(function (k) { profile[k] = form[k].value.trim(); });
+      var pw = form.password.value;
+      Cloud.updateProfile(profile, pw).then(function (r) {
+        Account.user = r.user; drawAccount(); back();
+        toast(pw ? 'Profile and password saved.' : 'Profile saved.');
+      }, function (x) { btn.disabled = false; err.textContent = x.message; err.hidden = false; });
+    };
+    form.name.focus();
   }
   function toast(msg) {
     var t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
