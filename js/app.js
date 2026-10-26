@@ -20,16 +20,189 @@
     data: null,
     load: function () {
       try { this.data = JSON.parse(localStorage.getItem(this.key)) || {}; } catch (e) { this.data = {}; }
-      var d = this.data;
+      return this.defaults(this.data);
+    },
+    defaults: function (d) {
       d.steps = d.steps || {}; d.quiz = d.quiz || {}; d.solved = d.solved || {}; d.tried = d.tried || {}; d.code = d.code || {};
       d.files = d.files || { 'data.txt': 'Hello file!\nThis is line 2.\n10 20 30\n' };
       d.playground = d.playground || null;
       d.tests = d.tests || {};
       return d;
     },
-    save: function () { try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) { } }
+    save: function () { try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) { } syncSoon(); },
+    // swap in new progress without replacing the S object every page closes over
+    replace: function (d) {
+      Object.keys(this.data).forEach(function (k) { delete this.data[k]; }, this);
+      Object.assign(this.data, d);
+      this.defaults(this.data);
+      try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) { }
+    }
   };
   var S = Store.load();
+
+  // ---------------------------------------------------------------- accounts
+  // Progress always lives in localStorage; when logged in it is also synced to the server
+  // (server.js) so it follows the student to other devices. On a plain static host the
+  // /api endpoints don't exist and the login button stays hidden.
+  var Account = { available: false, user: null, timer: null, dirty: false };
+  function apiCall(method, route, body) {
+    return fetch('api/' + route, {
+      method: method, credentials: 'same-origin',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      var ct = r.headers.get('content-type') || '';
+      if (ct.indexOf('application/json') < 0) throw new Error('no api');
+      return r.json().then(function (j) { if (!r.ok) { var e = new Error(j.error || 'Request failed'); e.status = r.status; throw e; } return j; });
+    });
+  }
+  function syncSoon() {
+    if (!Account.user) return;
+    Account.dirty = true;
+    clearTimeout(Account.timer);
+    Account.timer = setTimeout(pushProgress, 1500);
+  }
+  function pushProgress() {
+    if (!Account.user || !Account.dirty) return Promise.resolve();
+    Account.dirty = false;
+    setAccountStatus('saving');
+    return apiCall('PUT', 'progress', { data: S }).then(function () { setAccountStatus('saved'); }, function (e) {
+      if (e.status === 401) { Account.user = null; drawAccount(); return; }
+      Account.dirty = true; setAccountStatus('error');
+    });
+  }
+  // Combine progress saved on this device with the account's, keeping everything that was done in either.
+  function mergeProgress(server, local) {
+    var out = Object.assign({}, server, local);
+    out.steps = {};
+    [server.steps || {}, local.steps || {}].forEach(function (m) {
+      Object.keys(m).forEach(function (k) { var a = out.steps[k] || (out.steps[k] = []); m[k].forEach(function (i) { if (a.indexOf(i) < 0) a.push(i); }); });
+    });
+    out.solved = Object.assign({}, local.solved || {});
+    Object.keys(server.solved || {}).forEach(function (k) { var a = out.solved[k], b = server.solved[k]; out.solved[k] = a && b ? Math.min(a, b) : a || b; });
+    out.quiz = Object.assign({}, local.quiz, server.quiz);
+    out.tried = Object.assign({}, server.tried, local.tried);
+    out.code = Object.assign({}, server.code, local.code);           // code typed on this device is the newest
+    out.files = Object.assign({}, local.files, server.files);
+    out.tests = Object.assign({}, local.tests, server.tests);
+    out.playground = local.playground || server.playground || null;
+    out.last = local.last || server.last;
+    return out;
+  }
+  function hasProgress(d) {
+    return ['steps', 'solved', 'quiz', 'tried', 'code', 'tests'].some(function (k) { return d[k] && Object.keys(d[k]).length; });
+  }
+  function loadAccountProgress() {
+    return apiCall('GET', 'progress').then(function (r) {
+      var merged = r.data ? mergeProgress(r.data, S) : S;
+      Store.replace(JSON.parse(JSON.stringify(merged)));
+      Account.dirty = true;
+      return pushProgress();
+    });
+  }
+  function setAccountStatus(st) {
+    var b = $('.account-btn'); if (!b || !Account.user) return;
+    b.title = st === 'saving' ? 'Saving your progress…' : st === 'error' ? 'Could not save to your account — will retry' : 'Progress saved to your account';
+    b.classList.toggle('sync-error', st === 'error');
+  }
+  function drawAccount() {
+    var b = $('.account-btn'); if (!b) return;
+    b.hidden = !Account.available;
+    if (Account.user) { b.innerHTML = '<span class="acc-dot"></span>' + esc(Account.user.name); b.classList.add('signed-in'); setAccountStatus('saved'); }
+    else { b.textContent = 'Log in'; b.classList.remove('signed-in', 'sync-error'); b.title = 'Log in to save your progress to an account'; }
+  }
+  function initAccount() {
+    apiCall('GET', 'me').then(function (r) {
+      Account.available = true;
+      Account.user = r.user;
+      drawAccount();
+      if (r.user) return loadAccountProgress().then(rerenderSafe);
+      if (/^(#\/?(home)?)?$/.test(location.hash)) route();   // show the home page's log-in hint
+    }).catch(function () { Account.available = false; drawAccount(); });
+    // push anything still pending when the tab is closed
+    window.addEventListener('pagehide', function () {
+      if (!Account.user || !Account.dirty) return;
+      try { fetch('api/progress', { method: 'PUT', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: S }) }); } catch (e) { }
+    });
+  }
+  // re-draw the current page with new progress, but never in the middle of a running test
+  function rerenderSafe() { if (!/^#\/test\//.test(location.hash)) route(); }
+
+  function openAccountDialog() {
+    var ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    var close = function () { ov.remove(); document.removeEventListener('keydown', onEsc); };
+    var onEsc = function (e) { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onEsc);
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) close(); });
+    if (Account.user) {
+      var solved = PROBLEMS.filter(function (p) { return S.solved[p.id]; }).length, steps = 0;
+      LESSONS.forEach(function (L) { steps += lessonStats(L).steps; });
+      ov.innerHTML = '<div class="modal" role="dialog" aria-label="Account"><h2>' + esc(Account.user.name) + '</h2>' +
+        '<p class="muted">Your progress is saved to this account and follows you to any device you log in on.</p>' +
+        '<div class="acc-stats"><div><b>' + steps + '</b> lesson steps done</div><div><b>' + solved + '</b> problems solved</div></div>' +
+        '<div class="modal-actions"><button class="btn" data-a="close">Close</button><button class="btn primary" data-a="logout">Log out</button></div>' +
+        '<p class="muted small">Logging out clears your progress from this browser; it stays safe in your account.</p></div>';
+      document.body.appendChild(ov);
+      $('[data-a="close"]', ov).onclick = close;
+      $('[data-a="logout"]', ov).onclick = function () {
+        var btn = this; btn.disabled = true;
+        pushProgress().then(function () { return apiCall('POST', 'logout'); }).then(function () {
+          Account.user = null; Account.dirty = false;
+          try { localStorage.removeItem(Store.key); } catch (e) { }
+          Store.replace({});
+          drawAccount(); close(); route();
+        }, function () { btn.disabled = false; });
+      };
+      return;
+    }
+    var mode = 'login';
+    ov.innerHTML = '<form class="modal" role="dialog" aria-label="Log in" novalidate>' +
+      '<h2 class="acc-title">Log in</h2><p class="muted acc-sub">Save your lessons and practice to an account so they follow you to any device.</p>' +
+      '<label class="field"><span>Username</span><input name="username" autocomplete="username" required maxlength="30"></label>' +
+      '<label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>' +
+      '<div class="form-err" hidden></div>' +
+      '<div class="modal-actions"><button type="submit" class="btn primary acc-submit">Log in</button></div>' +
+      '<p class="acc-switch muted"><span class="acc-q">New here?</span> <a href="#" data-a="switch">Create an account</a></p></form>';
+    document.body.appendChild(ov);
+    var form = $('form', ov), err = $('.form-err', ov);
+    function setMode(m) {
+      mode = m;
+      var signup = m === 'signup';
+      $('.acc-title', ov).textContent = signup ? 'Create an account' : 'Log in';
+      $('.acc-submit', ov).textContent = signup ? 'Create account' : 'Log in';
+      $('.acc-q', ov).textContent = signup ? 'Already have an account?' : 'New here?';
+      $('[data-a="switch"]', ov).textContent = signup ? 'Log in' : 'Create an account';
+      form.password.setAttribute('autocomplete', signup ? 'new-password' : 'current-password');
+      form.password.placeholder = signup ? 'At least 6 characters' : '';
+      form.username.placeholder = signup ? 'letters, digits, _ . -' : '';
+      err.hidden = true;
+    }
+    $('[data-a="switch"]', ov).onclick = function (e) { e.preventDefault(); setMode(mode === 'login' ? 'signup' : 'login'); form.username.focus(); };
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      var btn = $('.acc-submit', ov); btn.disabled = true; err.hidden = true;
+      var hadLocal = hasProgress(S);
+      apiCall('POST', mode, { username: form.username.value, password: form.password.value }).then(function (r) {
+        Account.user = r.user;
+        drawAccount();
+        return loadAccountProgress().then(function () {
+          close(); rerenderSafe();
+          if (hadLocal) toast('Progress from this browser was added to your account.');
+        });
+      }).catch(function (x) {
+        btn.disabled = false;
+        err.textContent = x.message === 'no api' ? 'Accounts are not available on this server.' : x.message;
+        err.hidden = false;
+      });
+    };
+    form.username.focus();
+  }
+  function toast(msg) {
+    var t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function () { t.classList.add('out'); setTimeout(function () { t.remove(); }, 400); }, 3500);
+  }
   function stepDone(lid, i) { return (S.steps[lid] || []).indexOf(i) >= 0; }
   function markStep(lid, i) { var a = S.steps[lid] || (S.steps[lid] = []); if (a.indexOf(i) < 0) { a.push(i); Store.save(); } }
   function lessonStats(L) {
@@ -289,7 +462,8 @@
       '<h1>Learn C one step at a time — then <em>see</em> it run.</h1>' +
       '<p class="lead">' + LESSONS.length + ' lessons built from your course slides, class notes and lab manual, ' + PROBLEMS.length + ' practice problems from the task sheets with an instant judge, and a visualizer that shows every variable, array, pointer and function call as your program runs.</p>' +
       '<div class="hero-cta"><a class="btn primary lg" href="' + esc(cont) + '">' + (S.last ? 'Continue learning →' : 'Start lesson 1 →') + '</a><a class="btn lg" href="#/practice">Practice problems</a><a class="btn ghost lg" href="#/playground">Open playground</a></div>' +
-      '<div class="hero-stats"><div><b>' + doneSteps + '</b>/' + totalSteps + ' steps</div><div><b>' + solved + '</b>/' + PROBLEMS.length + ' problems solved</div></div>' +
+      '<div class="hero-stats"><div><b>' + doneSteps + '</b>/' + totalSteps + ' steps</div><div><b>' + solved + '</b>/' + PROBLEMS.length + ' problems solved</div>' +
+      '</div>' + (Account.available && !Account.user ? '<p class="hero-login muted"><a href="#" data-a="login">Log in</a> to keep your progress on every device.</p>' : '') +
       '</div><div class="hero-demo" aria-hidden="true">' + heroDemo() + '</div></section>';
     html += '<section class="how"><div class="how-item"><span class="how-n">1</span><div><b>Read a step</b><p>Short explanations with examples from your course.</p></div></div>' +
       '<div class="how-item"><span class="how-n">2</span><div><b>Run &amp; visualize</b><p>Press Visualize to step through memory or a flowchart.</p></div></div>' +
@@ -306,6 +480,8 @@
     });
     html += '</div>';
     main.innerHTML = '<div class="page">' + html + '</div>';
+    var lg = $('.hero-login [data-a="login"]');
+    if (lg) lg.onclick = function (e) { e.preventDefault(); openAccountDialog(); };
     var demo = $('.hero-demo [data-demo]');
     if (demo) demo.onclick = function () { Viz.open({ code: DEMO, input: '', title: 'Demo: swap with pointers' }); };
   }
@@ -839,7 +1015,9 @@
   document.addEventListener('DOMContentLoaded', function () {
     main = $('#main');
     $('.theme-toggle').onclick = toggleTheme;
+    $('.account-btn').onclick = openAccountDialog;
     window.addEventListener('hashchange', route);
     route();
+    initAccount();
   });
 })();

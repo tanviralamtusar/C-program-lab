@@ -114,6 +114,30 @@ textarea { font-family: var(--mono); font-size: .85rem; }
 .nav a:hover { background: var(--surface-2); }
 .nav a.active { background: var(--primary-soft); color: var(--primary); }
 
+/* ============================================================ account */
+.account-btn { max-width: 14em; overflow: hidden; text-overflow: ellipsis; }
+.account-btn.signed-in { border-color: transparent; background: var(--surface-2); }
+.acc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.account-btn.sync-error .acc-dot { background: var(--accent); }
+.modal-overlay { position: fixed; inset: 0; z-index: 120; background: rgba(10, 14, 22, .55); display: grid; place-items: center; padding: 16px; animation: fadein .15s; }
+.modal { width: 100%; max-width: 380px; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; padding: 1.4rem 1.5rem 1.1rem; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+.modal h2 { margin: 0 0 .3rem; font-size: 1.3rem; }
+.modal .muted { margin: 0 0 1rem; font-size: .9rem; }
+.modal .small { font-size: .8rem; margin: .8rem 0 0; }
+.field { display: flex; flex-direction: column; gap: .3rem; margin-bottom: .8rem; font-size: .85rem; font-weight: 600; color: var(--ink-2); }
+.field input { font: 400 1rem var(--font); padding: .55em .7em; }
+.field input:focus { outline: 2px solid var(--primary); outline-offset: 0; border-color: var(--primary); }
+.form-err { background: var(--bad-soft); color: var(--bad); border-radius: 8px; padding: .5em .7em; font-size: .88rem; margin-bottom: .8rem; }
+.modal-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.modal-actions .btn { min-width: 7em; justify-content: center; }
+form.modal .modal-actions .btn { flex: 1; padding: .6em; font-size: .95rem; }
+.acc-switch { text-align: center; margin: 1rem 0 0 !important; }
+.acc-stats { display: flex; gap: 1.5rem; margin-bottom: 1.2rem; font-size: .9rem; color: var(--ink-2); }
+.acc-stats b { font-size: 1.4rem; color: var(--ink); display: block; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 130; background: var(--ink); color: var(--bg); padding: .65em 1.1em; border-radius: 10px; font-size: .9rem; box-shadow: var(--shadow); transition: opacity .4s; max-width: calc(100vw - 32px); }
+.toast.out { opacity: 0; }
+.hero-login { margin: .5rem 0 0; font-size: .9rem; }
+
 /* ============================================================ pages */
 .page { max-width: 1120px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 .section-title { font-size: 1.35rem; margin-top: 2.5rem; }
@@ -512,6 +536,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
 }
 @media (max-width: 640px) {
   .topbar { gap: .6rem; padding: .5rem 16px; }
+  .account-btn { max-width: 7em; padding: .3em .6em; }
   .brand-text { display: none; }
   .nav { overflow-x: auto; scrollbar-width: none; min-width: 0; }
   .nav::-webkit-scrollbar { display: none; }
