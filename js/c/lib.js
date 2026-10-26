@@ -350,8 +350,8 @@ CI_MODULES.push(function (CI) {
   V.stdinSrc = function () {
     var self = this;
     return {
-      peek: function () { if (self.inPos < self.stdin.length) return self.stdin.charCodeAt(self.inPos) & 255; self.stdinEof = true; return EOF; },
-      get: function () { if (self.inPos < self.stdin.length) return self.stdin.charCodeAt(self.inPos++) & 255; self.stdinEof = true; return EOF; }
+      peek: function () { if (self.inPos < self.stdin.length) return self.stdin.charCodeAt(self.inPos) & 255; if (self.interactive) throw { needInput: true }; self.stdinEof = true; return EOF; },
+      get: function () { if (self.inPos < self.stdin.length) return self.stdin.charCodeAt(self.inPos++) & 255; if (self.interactive) throw { needInput: true }; self.stdinEof = true; return EOF; }
     };
   };
   V.handle = function (fp, fname, needRead, needWrite) {

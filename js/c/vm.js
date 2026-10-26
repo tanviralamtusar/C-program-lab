@@ -181,6 +181,7 @@ CI_MODULES.push(function (CI) {
     this.staticTop = prog.staticTop;
     this.scratch = Math.ceil(prog.staticTop / 16) * 16; this.staticTop = this.scratch + 4096;
     this.stdin = encodeUtf8(opts.stdin || '');
+    this.interactive = !!opts.interactive && !opts.stdinClosed; // stop with needInput instead of hitting EOF
     this.inPos = 0;
     this.out = []; this.outLen = 0;
     this.frames = []; this.frame = null;
@@ -665,7 +666,8 @@ CI_MODULES.push(function (CI) {
       var r = this.callFn(prog.main, args, prog.main.line);
       this.exitCode = r === undefined ? 0 : Number(r);
     } catch (ex) {
-      if (ex && ex.exitSignal) { this.exitCode = ex.code; }
+      if (ex && ex.needInput) { this.needInput = true; }
+      else if (ex && ex.exitSignal) { this.exitCode = ex.code; }
       else if (ex instanceof CError) { this.error = ex; }
       else if (ex instanceof RangeError) { this.error = new CError('runtime', 'Stack overflow: recursion is too deep (' + this.frames.length + ' calls). Check your base case.', this.curLine); }
       else throw ex;
@@ -679,7 +681,7 @@ CI_MODULES.push(function (CI) {
     var files = {}; for (var k in this.fs) files[k] = decodeUtf8(this.fs[k]);
     return {
       stdout: decodeUtf8(outStr), stdoutRaw: outStr, exitCode: this.exitCode, error: this.error ? { kind: this.error.kind, message: this.error.message, line: this.error.line } : null,
-      warnings: this.warnings, steps: this.steps, trace: this.trace, truncated: this.truncated, files: files, stdinUsed: this.inPos, stdinLen: this.stdin.length
+      warnings: this.warnings, steps: this.steps, trace: this.trace, truncated: this.truncated, files: files, stdinUsed: this.inPos, stdinLen: this.stdin.length, needInput: !!this.needInput
     };
   };
   V.findGlobal = function (n) {

@@ -103,10 +103,140 @@
   }
 
   // ---------------------------------------------------------------- run result rendering
+  // console-style output (OnlineGDB-like): plain program text on black, status lines in green
+  function termBox(hint) {
+    return '<div class="term"><div class="term-bar"><span class="term-title">console</span></div>' +
+      '<div class="io-out term-body">' + termIdle(hint) + '</div></div>';
+  }
+  function termIdle(hint) { return '<div class="term-dim">' + esc(hint) + '</div>'; }
+  function termRunning(withStop) {
+    return '<div class="term-dim">Running…' + (withStop ? ' <button class="term-stop stop">Stop</button>' : '') + '</div>';
+  }
+  function termAt(line) { return line ? '<a href="#" data-line="' + line + '">main.c:' + line + '</a>: ' : 'main.c: '; }
+  // compile messages shown above the program output
+  function termCompileMsgs(res, editor) {
+    var html = '';
+    if (res.warnings && res.warnings.length) {
+      html += res.warnings.slice(0, 12).map(function (w) { if (editor) editor.mark(w.line, 'warn', w.msg); return '<div class="term-warn">' + termAt(w.line) + '<b>warning:</b> ' + esc(w.msg) + '</div>'; }).join('') + '<div class="term-gap"></div>';
+    }
+    if (res.compileError) {
+      html += '<div class="term-err">' + termAt(res.compileError.line) + '<b>error:</b> ' + esc(res.compileError.message) + '</div>' +
+        '<div class="term-gap"></div><div class="term-ok">Compilation failed due to the error above.</div>';
+      if (editor) editor.mark(res.compileError.line, 'err', res.compileError.message);
+    }
+    return html;
+  }
+  // runtime error or exit line shown below the program output
+  function termEnd(res, editor) {
+    if (res.error) {
+      if (editor && res.error.line) editor.mark(res.error.line, 'err', res.error.message);
+      return '<div class="term-err">' + (res.error.kind === 'internal' ? 'Interpreter problem' : 'Runtime error') + (res.error.line ? ' at ' + termAt(res.error.line).replace(/: $/, '') : '') + ': ' + esc(res.error.message) + '</div>';
+    }
+    return '<div class="term-ok' + (res.exitCode ? ' term-bad' : '') + '">...Program finished with exit code ' + (res.exitCode || 0) + '</div>';
+  }
+  function termLinks(box, editor) {
+    $$('[data-line]', box).forEach(function (a) { a.onclick = function (e) { e.preventDefault(); editor && editor.goto(+a.getAttribute('data-line')); }; });
+  }
+  function renderTerminal(box, res, editor, opts) {
+    var html = termCompileMsgs(res, editor);
+    if (!res.compileError) {
+      if (res.stdout) html += '<pre class="term-out">' + esc(res.stdout.replace(/\n$/, '')) + '</pre><div class="term-gap"></div>';
+      html += termEnd(res, editor);
+      if (res.stdinLen != null && res.stdinUsed != null && res.stdinUsed < res.stdinLen && opts.input && /\S/.test(opts.input.slice(res.stdinUsed))) html += '<div class="term-dim">Note: part of the input was never read by the program.</div>';
+    }
+    box.innerHTML = html;
+    termLinks(box, editor);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // Interactive console: the program stops with needInput whenever it reads past the typed input;
+  // the typed line is appended and the program re-runs from the start (runs are deterministic).
+  function makeConsole(host, cfg) {
+    var body = $('.term-body', host), stdin = '', typed = [], closed = false, job = null, last = null, state = 'idle', files0 = {};
+    function setState(s) { state = s; host.setAttribute('data-state', s); $('.con-stop', host).hidden = !(s === 'running' || s === 'waiting'); }
+    function transcript(out) {
+      // interleave program output with what was typed, at the output position where each line was asked for
+      var html = '', pos = 0;
+      typed.forEach(function (t) { var at = Math.min(t.at, out.length); html += esc(out.slice(pos, at)) + '<span class="con-typed">' + esc(t.text) + '</span>\n'; pos = Math.max(pos, at); });
+      return html + esc(out.slice(pos));
+    }
+    function draw(res, slow) {
+      var html = termCompileMsgs(res, null), out = res.stdout || '';
+      if (!res.compileError) {
+        html += '<pre class="term-out">' + transcript(state === 'done' ? out.replace(/\n$/, '') : out);
+        if (state === 'waiting') html += '<input class="con-in" spellcheck="false" autocomplete="off" aria-label="Program input">';
+        html += '</pre>';
+        if (slow) html += '<div class="term-dim">Running…</div>';
+        if (state === 'done') {
+          html += '<div class="term-gap"></div>' + termEnd(res, null);
+          if (res.stdinLen != null && res.stdinUsed < res.stdinLen && /\S/.test(stdin.slice(res.stdinUsed))) html += '<div class="term-dim">Note: part of the input was never read by the program.</div>';
+          html += '<div class="term-ok">Press ENTER to exit console.</div>';
+        }
+      }
+      body.innerHTML = html;
+      termLinks(body, cfg.editor);
+      var inp = $('.con-in', body);
+      if (inp) {
+        inp.onkeydown = function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); send(inp.value); }
+          else if ((e.key === 'd' || e.key === 'z') && e.ctrlKey) { e.preventDefault(); if (inp.value) send(inp.value, true); else { closed = true; exec(); } }
+          else if (e.key === 'c' && e.ctrlKey && !inp.value) { e.preventDefault(); stop(); }
+        };
+        inp.focus({ preventScroll: true });
+      }
+      body.scrollTop = body.scrollHeight;
+    }
+    function send(line, thenClose) {
+      typed.push({ at: (last.stdout || '').length, text: line });
+      stdin += line + '\n';
+      if (thenClose) closed = true;
+      exec();
+    }
+    function exec() {
+      if (job) job.cancel();
+      setState('running');
+      var slowTimer = setTimeout(function () { if (state === 'running' && last) draw(last, true); else if (state === 'running') body.innerHTML = termRunning(false); }, 350);
+      var me = job = Runner.run(cfg.getCode(), { stdin: stdin, files: files0, interactive: true, stdinClosed: closed });
+      me.promise.then(function (r) {
+        clearTimeout(slowTimer);
+        if (job !== me) return;
+        job = null; last = r;
+        if (cfg.editor) cfg.editor.clearMarks();
+        termCompileMsgs(r, cfg.editor);
+        if (r.needInput) { setState('waiting'); draw(r); return; }
+        setState('done');
+        if (r.error && cfg.editor && r.error.line) cfg.editor.mark(r.error.line, 'err', r.error.message);
+        draw(r);
+        if (cfg.onDone) cfg.onDone(r, stdin);
+      });
+    }
+    function start() {
+      stdin = ''; typed = []; closed = false; last = null; files0 = JSON.parse(JSON.stringify(cfg.getFiles ? cfg.getFiles() : {}));
+      exec();
+    }
+    function stop() {
+      if (job) { job.cancel(); job = null; }
+      if (state !== 'running' && state !== 'waiting') return;
+      setState('done');
+      body.insertAdjacentHTML('beforeend', '<div class="term-err">^C</div><div class="term-ok">...Program stopped.</div>');
+      var inp = $('.con-in', body); if (inp) inp.remove();
+    }
+    function clear() { setState('idle'); body.innerHTML = termIdle(cfg.hint); }
+    // click anywhere in the console to type; Enter after the program finished clears it
+    body.addEventListener('mousedown', function (e) { var inp = $('.con-in', body); if (inp && e.target === body) { e.preventDefault(); inp.focus(); } });
+    host.addEventListener('keydown', function (e) { if (state === 'done' && e.key === 'Enter' && e.target === host) { e.preventDefault(); clear(); } });
+    body.addEventListener('mouseup', function () { if (state === 'done' && !String(window.getSelection())) host.focus({ preventScroll: true }); });
+    $('.con-stop', host).onclick = stop;
+    $('.con-clear', host).onclick = function () { if (state === 'running' || state === 'waiting') stop(); clear(); };
+    clear();
+    return { start: start, stop: stop, focus: function () { host.focus(); } };
+  }
+
   function renderResult(box, res, editor, opts) {
     opts = opts || {};
     var html = '';
     if (editor) editor.clearMarks();
+    if (box.classList.contains('term-body')) return renderTerminal(box, res, editor, opts);
     if (res.compileError) {
       html += '<div class="res-err"><div class="res-err-title">Compile error' + (res.compileError.line ? ' on <a href="#" data-line="' + res.compileError.line + '">line ' + res.compileError.line + '</a>' : '') + '</div>' + esc(res.compileError.message) + '</div>';
       if (editor) editor.mark(res.compileError.line, 'err', res.compileError.message);
@@ -341,7 +471,7 @@
       '<div class="ed-bar"><span class="ed-file">main.c</span><div class="ed-actions"><button class="btn sm" data-a="reset" title="Reset to starter code">Reset</button><button class="btn sm" data-a="viz">👁 Visualize</button><button class="btn sm" data-a="run" title="Ctrl+Enter">▶ Run</button>' + (p.kind === 'concept' ? '' : '<button class="btn sm primary" data-a="submit">✓ Submit</button>') + '</div></div>' +
       '<div class="ed-host"></div>' +
       '<div class="bottom-panel"><div class="tabs small"><button class="tab active" data-bt="io">Input / Output</button>' + (p.kind === 'concept' ? '' : '<button class="tab" data-bt="tests">Test results</button>') + '</div>' +
-      '<div class="bt" data-bt="io"><div class="io-grid"><div><div class="io-label">Input (stdin)</div><textarea class="io-in" spellcheck="false" placeholder="Type the input your program reads with scanf…">' + esc(sample ? sample.input : '') + '</textarea></div><div><div class="io-label">Output</div><div class="io-out"><div class="muted">Press ▶ Run (Ctrl+Enter) to run with this input, or ✓ Submit to check all tests.</div></div></div></div></div>' +
+      '<div class="bt" data-bt="io"><div class="io-grid"><div><div class="io-label">Input (stdin)</div><textarea class="io-in" spellcheck="false" placeholder="Type the input your program reads with scanf…">' + esc(sample ? sample.input : '') + '</textarea></div><div><div class="io-label">Output</div>' + termBox('Press ▶ Run (Ctrl+Enter) to run with this input, or ✓ Submit to check all tests.') + '</div></div></div>' +
       '<div class="bt" data-bt="tests" hidden><div class="test-results"><div class="muted">Press ✓ Submit to run your code against ' + p.tests.length + ' tests.</div></div></div>' +
       '</div></section></div>';
     main.innerHTML = html;
@@ -369,7 +499,7 @@
       showBottom('io');
       var out = $('.io-out');
       if (running) running.cancel();
-      out.innerHTML = '<div class="muted">Running… <button class="btn sm ghost stop">Stop</button></div>';
+      out.innerHTML = termRunning(true);
       var inp = $('.io-in').value;
       running = Runner.run(ed.get(), { stdin: inp, files: sample ? sample.files : {} });
       $('.stop', out).onclick = function () { running.cancel(); };
@@ -427,37 +557,33 @@
       exOpts += '</optgroup>';
     });
     main.innerHTML = '<div class="pg-layout"><section class="pg-main"><div class="ed-bar"><span class="ed-file">main.c</span><select class="pg-examples">' + exOpts + '</select><div class="ed-actions"><button class="btn sm" data-a="new">New</button><button class="btn sm" data-a="viz">👁 Visualize</button><button class="btn sm primary" data-a="run" title="Ctrl+Enter">▶ Run</button></div></div><div class="ed-host"></div></section>' +
-      '<section class="pg-side"><div class="io-label">Input (stdin)</div><textarea class="io-in" spellcheck="false" placeholder="Input for scanf / getchar…">' + esc(pg.input || '') + '</textarea>' +
-      '<div class="io-label">Output</div><div class="io-out"><div class="muted">Press ▶ Run (Ctrl+Enter).</div></div>' +
+      '<section class="pg-side"><div class="term con" tabindex="-1"><div class="term-bar"><span class="term-title">console</span><span class="term-hint">type input here · Ctrl+D = end of input</span><button class="term-stop con-stop" hidden>■ Stop</button><button class="term-stop con-clear">Clear</button></div><div class="io-out term-body"></div></div>' +
       '<details class="files-panel"' + '><summary>Virtual files <span class="muted small">(for fopen)</span></summary><div class="files-list"></div><div class="file-new"><input class="file-name" placeholder="new-file.txt"><button class="btn sm" data-a="addfile">Add file</button></div></details></section></div>';
+    var lastInput = pg.input || '';
+    function savePg() { S.playground = { code: ed.get(), input: lastInput }; saveSoon(); }
     var ed = makeEditor($('.ed-host'), pg.code, {
-      onChange: function (v) { S.playground = { code: v, input: $('.io-in').value }; saveSoon(); },
+      onChange: savePg,
       onRun: function () { run(); }
     });
-    $('.io-in').oninput = function () { S.playground = { code: ed.get(), input: this.value }; saveSoon(); };
+    var con = makeConsole($('.con'), {
+      editor: ed, hint: 'Press ▶ Run (Ctrl+Enter), then type the program\'s input right here.',
+      getCode: function () { return ed.get(); },
+      getFiles: function () { return S.files; },
+      onDone: function (r, stdin) {
+        lastInput = stdin; savePg();
+        if (r.files && !r.compileError) { S.files = r.files; Store.save(); drawFiles(); }
+      }
+    });
     $('.pg-examples').onchange = function () {
       if (!this.value) return;
       var parts = this.value.split('|'), b = LES[parts[0]].steps[+parts[1]].blocks[+parts[2]];
-      ed.set(b.code); $('.io-in').value = b.input || ''; S.playground = { code: b.code, input: b.input || '' }; Store.save();
+      ed.set(b.code); lastInput = b.input || ''; S.playground = { code: b.code, input: lastInput }; Store.save();
       this.value = '';
     };
-    $('[data-a="new"]').onclick = function () { if (confirmReplace()) { ed.set('#include <stdio.h>\n\nint main(void) {\n    \n    return 0;\n}\n'); $('.io-in').value = ''; } };
-    $('[data-a="viz"]').onclick = function () { Viz.open({ code: ed.get(), input: $('.io-in').value, files: S.files, title: 'Playground' }); };
+    $('[data-a="new"]').onclick = function () { if (confirmReplace()) { ed.set('#include <stdio.h>\n\nint main(void) {\n    \n    return 0;\n}\n'); lastInput = ''; } };
+    $('[data-a="viz"]').onclick = function () { Viz.open({ code: ed.get(), input: lastInput, files: S.files, title: 'Playground' }); };
     $('[data-a="run"]').onclick = run;
-    var running = null;
-    function run() {
-      var out = $('.io-out');
-      if (running) running.cancel();
-      out.innerHTML = '<div class="muted">Running… <button class="btn sm ghost stop">Stop</button></div>';
-      var inp = $('.io-in').value;
-      running = Runner.run(ed.get(), { stdin: inp, files: S.files });
-      $('.stop', out).onclick = function () { running.cancel(); };
-      running.promise.then(function (r) {
-        running = null;
-        renderResult(out, r, ed, { input: inp });
-        if (r.files && !r.compileError) { S.files = r.files; Store.save(); drawFiles(); }
-      });
-    }
+    function run() { con.start(); }
     function drawFiles() {
       var names = Object.keys(S.files);
       $('.files-list').innerHTML = names.length ? names.map(function (n) {
@@ -581,7 +707,7 @@
         box.innerHTML = '<div class="tp"><div class="tp-left"><div class="tq-head"><span class="tq-label">' + itemLabel(T, st.cur) + ' · ' + esc(p.title) + '</span><span class="badge">' + it.marks + ' marks</span></div><div class="prose">' + p.statement + '</div>' +
           (sample ? '<div class="sample"><div class="sample-col"><div class="sample-label">Sample input</div><pre>' + (sample.input ? esc(sample.input) : '<span class="muted">(none)</span>') + '</pre></div><div class="sample-col"><div class="sample-label">Sample output</div><pre>' + esc(sample.output) + '</pre></div></div>' : '') + nav + '</div>' +
           '<div class="tp-right"><div class="ed-bar"><span class="ed-file">main.c</span><div class="ed-actions"><button class="btn sm primary" data-a="run" title="Ctrl+Enter">▶ Run</button></div></div><div class="ed-host"></div>' +
-          '<div class="tp-io"><div><div class="io-label">Input</div><textarea class="io-in" spellcheck="false">' + esc(sample ? sample.input : '') + '</textarea></div><div><div class="io-label">Output</div><div class="io-out"><div class="muted">Run your code with your own input to check it.</div></div></div></div></div></div>';
+          '<div class="tp-io"><div><div class="io-label">Input</div><textarea class="io-in" spellcheck="false">' + esc(sample ? sample.input : '') + '</textarea></div><div><div class="io-label">Output</div>' + termBox('Run your code with your own input to check it.') + '</div></div></div></div>';
         var ed = makeEditor($('.ed-host', box), st.code[p.id] != null ? st.code[p.id] : p.starter, {
           onChange: function (v) { st.code[p.id] = v; saveSoon(); clearTimeout(navTimer); navTimer = setTimeout(drawNav, 700); },
           onRun: function () { runIt(); }
@@ -590,7 +716,7 @@
         var runIt = function () {
           var out = $('.io-out', box), inp = $('.io-in', box).value;
           if (job) job.cancel();
-          out.innerHTML = '<div class="muted">Running…</div>';
+          out.innerHTML = termRunning(false);
           job = Runner.run(ed.get(), { stdin: inp, files: sample ? sample.files : {} });
           job.promise.then(function (r) { job = null; renderResult(out, r, ed, { input: inp }); });
         };
