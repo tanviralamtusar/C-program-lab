@@ -44,7 +44,10 @@
   // Progress always lives in localStorage; when logged in it is also synced to the server
   // (server.js) so it follows the student to other devices. On a plain static host the
   // /api endpoints don't exist and the login button stays hidden.
-  var Account = { available: false, user: null, timer: null, dirty: false };
+  // `base` is the server version this browser last saw; a save based on an older version is
+  // refused (409) and merged instead, so two devices never overwrite each other's progress.
+  var Account = { available: false, user: null, timer: null, dirty: false, base: 0, queue: Promise.resolve(), lastPull: 0 };
+  function serial(fn) { var run = function () { return fn(); }; Account.queue = Account.queue.then(run, run); return Account.queue; }   // one sync request at a time
   function apiCall(method, route, body) {
     return fetch('api/' + route, {
       method: method, credentials: 'same-origin',
@@ -53,7 +56,7 @@
     }).then(function (r) {
       var ct = r.headers.get('content-type') || '';
       if (ct.indexOf('application/json') < 0) throw new Error('no api');
-      return r.json().then(function (j) { if (!r.ok) { var e = new Error(j.error || 'Request failed'); e.status = r.status; throw e; } return j; });
+      return r.json().then(function (j) { if (!r.ok) { var e = new Error(j.error || 'Request failed'); e.status = r.status; e.body = j; throw e; } return j; });
     });
   }
   function syncSoon() {
@@ -63,12 +66,39 @@
     Account.timer = setTimeout(pushProgress, 1500);
   }
   function pushProgress() {
-    if (!Account.user || !Account.dirty) return Promise.resolve();
-    Account.dirty = false;
-    setAccountStatus('saving');
-    return apiCall('PUT', 'progress', { data: S }).then(function () { setAccountStatus('saved'); }, function (e) {
-      if (e.status === 401) { Account.user = null; drawAccount(); return; }
-      Account.dirty = true; setAccountStatus('error');
+    return serial(function push(tries) {
+      if (!Account.user || !Account.dirty) return;
+      Account.dirty = false;
+      setAccountStatus('saving');
+      return apiCall('PUT', 'progress', { data: S, base: Account.base }).then(function (r) {
+        Account.base = r.updated; setAccountStatus('saved');
+      }, function (e) {
+        if (e.status === 401) { Account.user = null; drawAccount(); return; }
+        if (e.status === 409 && e.body && (tries || 0) < 3) {   // another device saved first: merge, then save again
+          Store.replace(JSON.parse(JSON.stringify(mergeProgress(e.body.data || {}, S))));
+          Account.base = e.body.updated; Account.dirty = true;
+          refreshPage();
+          return push((tries || 0) + 1);
+        }
+        Account.dirty = true; setAccountStatus('error');
+        clearTimeout(Account.timer); Account.timer = setTimeout(pushProgress, 15000);
+      });
+    });
+  }
+  // Fetch what other devices saved. Called when the tab comes back into view and once a minute.
+  function pullProgress() {
+    if (!Account.user || document.hidden || Date.now() - Account.lastPull < 5000) return;
+    Account.lastPull = Date.now();
+    serial(function () {
+      return apiCall('GET', 'progress').then(function (r) {
+        if (!Account.user || !r.updated || r.updated === Account.base) return;
+        // nothing unsaved here: take the account's progress as is (so resets made elsewhere carry over)
+        var next = Account.dirty ? mergeProgress(r.data || {}, S) : r.data || {};
+        Store.replace(JSON.parse(JSON.stringify(next)));
+        Account.base = r.updated;
+        refreshPage();
+        if (Account.dirty) { clearTimeout(Account.timer); Account.timer = setTimeout(pushProgress, 300); }
+      }).catch(function () { });
     });
   }
   // Combine progress saved on this device with the account's, keeping everything that was done in either.
@@ -93,12 +123,15 @@
     return ['steps', 'solved', 'quiz', 'tried', 'code', 'tests'].some(function (k) { return d[k] && Object.keys(d[k]).length; });
   }
   function loadAccountProgress() {
-    return apiCall('GET', 'progress').then(function (r) {
-      var merged = r.data ? mergeProgress(r.data, S) : S;
-      Store.replace(JSON.parse(JSON.stringify(merged)));
-      Account.dirty = true;
-      return pushProgress();
-    });
+    return serial(function () {
+      return apiCall('GET', 'progress').then(function (r) {
+        var merged = r.data ? mergeProgress(r.data, S) : S;
+        Store.replace(JSON.parse(JSON.stringify(merged)));
+        Account.base = r.updated || 0;
+        Account.dirty = true;
+        Account.lastPull = Date.now();
+      });
+    }).then(pushProgress);
   }
   function setAccountStatus(st) {
     var b = $('.account-btn'); if (!b || !Account.user) return;
@@ -119,14 +152,19 @@
       if (r.user) return loadAccountProgress().then(rerenderSafe);
       if (/^(#\/?(home)?)?$/.test(location.hash)) route();   // show the home page's log-in hint
     }).catch(function () { Account.available = false; drawAccount(); });
-    // push anything still pending when the tab is closed
+    // push anything still pending when the tab is closed (if it clashes, it is merged on the next visit)
     window.addEventListener('pagehide', function () {
       if (!Account.user || !Account.dirty) return;
-      try { fetch('api/progress', { method: 'PUT', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: S }) }); } catch (e) { }
+      try { fetch('api/progress', { method: 'PUT', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: S, base: Account.base }) }); } catch (e) { }
     });
+    document.addEventListener('visibilitychange', pullProgress);
+    window.addEventListener('focus', pullProgress);
+    setInterval(pullProgress, 60000);
   }
   // re-draw the current page with new progress, but never in the middle of a running test
   function rerenderSafe() { if (!/^#\/test\//.test(location.hash)) route(); }
+  // after a background sync: re-draw pages that only show progress, never one with an editor open
+  function refreshPage() { if (!/^#\/(test|problem|playground)\b/.test(location.hash)) route(); }
 
   function openAccountDialog() {
     var ov = document.createElement('div');

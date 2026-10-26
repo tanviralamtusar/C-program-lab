@@ -6,7 +6,7 @@
    POST /api/logout                          -> {ok}
    GET  /api/me                              -> {user|null}
    GET  /api/progress                        -> {data|null, updated}
-   PUT  /api/progress {data}                 -> {ok, updated}
+   PUT  /api/progress {data, base}           -> {ok, updated}  or 409 {data, updated} if base is stale
 */
 'use strict';
 var http = require('http');
@@ -120,7 +120,10 @@ function api(req, res, route) {
       return readBody(req, function (err, b) {
         if (err) return send(res, err.message === 'too large' ? 413 : 400, { error: err.message === 'too large' ? 'Progress is too large to save.' : 'Bad request.' });
         if (!b || typeof b.data !== 'object' || !b.data) return send(res, 400, { error: 'Bad request.' });
-        var updated = Date.now();
+        // another device saved since this one last synced: hand back the newer copy to merge
+        var cur = readJson(progressFile(me.id), null);
+        if (cur && b.base != null && b.base !== cur.updated) return send(res, 409, { error: 'Progress changed on another device.', data: cur.data, updated: cur.updated });
+        var updated = Math.max(Date.now(), cur ? cur.updated + 1 : 0);
         writeJson(progressFile(me.id), { data: b.data, updated: updated });
         send(res, 200, { ok: true, updated: updated });
       });
